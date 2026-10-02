@@ -10,6 +10,7 @@ import {
 } from '@angular/core';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { GlobalConfigService } from '../../features/config/global-config.service';
+import { getChangedAppFeatures } from '../../features/config/get-changed-app-features.util';
 import { TaskWidgetSettingsService } from '../../features/config/task-widget-settings.service';
 import { FocusModeLocalSettingsService } from '../../features/config/focus-mode-local-settings.service';
 import {
@@ -25,6 +26,7 @@ import {
   GLOBAL_TASKS_FORM_CONFIG,
 } from '../../features/config/global-config-form-config.const';
 import {
+  AppFeaturesConfig,
   ConfigFormConfig,
   GenericConfigFormSection,
   GlobalConfigFormSectionKey,
@@ -69,12 +71,7 @@ import { NgTemplateOutlet } from '@angular/common';
 import { LocalBackupService } from '../../imex/local-backup/local-backup.service';
 import { DialogBackupsListComponent } from '../../imex/local-backup/dialog-backups-list/dialog-backups-list.component';
 import { FormsModule } from '@angular/forms';
-import {
-  MatFormField,
-  MatLabel,
-  MatPrefix,
-  MatSuffix,
-} from '@angular/material/form-field';
+import { MatFormField, MatPrefix, MatSuffix } from '@angular/material/form-field';
 import { MatInput } from '@angular/material/input';
 import { MatAutocomplete, MatAutocompleteTrigger } from '@angular/material/autocomplete';
 import { MatOption } from '@angular/material/core';
@@ -108,7 +105,6 @@ const TAB_ANIMATION_DURATION_MS = 200;
     NgTemplateOutlet,
     FormsModule,
     MatFormField,
-    MatLabel,
     MatInput,
     MatPrefix,
     MatSuffix,
@@ -256,6 +252,7 @@ export class ConfigPageComponent implements OnInit {
     // Use effect to react to plugin shortcuts changes for live updates
     effect(() => {
       const shortcuts = this._pluginBridgeService.shortcuts();
+      // eslint-disable-next-line local-rules/no-user-content-in-logs -- grandfathered log baseline (2026-09), not yet triaged
       Log.log('Plugin shortcuts changed:', { shortcuts });
       this._updateKeyboardFormWithPluginShortcuts(shortcuts);
     });
@@ -396,6 +393,18 @@ export class ConfigPageComponent implements OnInit {
 
     // From here on we know it's a real GlobalConfigState section.
     const sectionKey = formSectionKey as GlobalConfigSectionKey;
+
+    if (sectionKey === 'appFeatures') {
+      // Sync only the switches that changed, never this device's untouched defaults.
+      const changed = getChangedAppFeatures(
+        this.configService.appFeatures(),
+        config as Partial<AppFeaturesConfig>,
+      );
+      if (Object.keys(changed).length > 0) {
+        this.configService.updateSection(sectionKey, changed);
+      }
+      return;
+    }
 
     this.configService.updateSection(sectionKey, config);
   }

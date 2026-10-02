@@ -93,6 +93,17 @@
     }
   </div>
 
+  @if (isTouchActive() && isInTaskRow) {
+    <button
+      (click)="enterSelectionMode()"
+      mat-menu-item
+    >
+      <span class="menuItemLeft">
+        <mat-icon>checklist_rtl</mat-icon>
+        {{ T.F.TASK.MULTI_SELECT.SELECT_ENTRY | translate }}
+      </span>
+    </button>
+  }
   @if (
     isTimeTrackingEnabled() &&
     ((isAdvancedControls() && isTouchActive()) || !isAdvancedControls()) &&
@@ -146,7 +157,7 @@
       <span class="key-i">{{ kb.togglePlay }}</span>
     </button>
   }
-  @if (isTouchActive() || !isAdvancedControls()) {
+  @if (!isTouchActive() && !isAdvancedControls()) {
     <button
       (click)="toggleTaskDone()"
       mat-menu-item
@@ -290,6 +301,19 @@
   }
 
   <button
+    #priorityMenuTrigger="matMenuTrigger"
+    [matMenuTriggerFor]="priorityMenu"
+    mat-menu-item
+    [menuTouchFix]="priorityMenuTrigger"
+    (menuOpened)="focusCheckedSubmenuItem(priorityMenu)"
+  >
+    <span class="menuItemLeft">
+      <mat-icon>priority_high</mat-icon>
+      {{ T.F.TASK.CMP.PRIORITY | translate }}
+    </span>
+  </button>
+
+  <button
     #tagMenuTrigger="matMenuTrigger"
     [matMenuTriggerFor]="tagMenu"
     mat-menu-item
@@ -334,6 +358,21 @@
     </button>
   }
 
+  @if (pluginTaskContextMenuEntries().length) {
+    <button
+      #pluginTaskActionsMenuTrigger="matMenuTrigger"
+      [matMenuTriggerFor]="pluginTaskActionsMenu"
+      mat-menu-item
+      [menuTouchFix]="pluginTaskActionsMenuTrigger"
+      (menuOpened)="focusFirstSubmenuItem(pluginTaskActionsMenu)"
+    >
+      <span class="menuItemLeft">
+        <mat-icon>extension</mat-icon>
+        {{ T.PLUGINS.TASK_CONTEXT_MENU_ACTIONS | translate }}
+      </span>
+    </button>
+  }
+
   <button
     (click)="deleteTask()"
     class="color-warn"
@@ -348,6 +387,26 @@
     </span>
     <span class="key-i">{{ kb.taskDelete }}</span>
   </button>
+</mat-menu>
+
+<mat-menu #pluginTaskActionsMenu="matMenu">
+  <ng-template matMenuContent>
+    @for (
+      entry of pluginTaskContextMenuEntries();
+      track entry.pluginId + ':' + entry.entryId
+    ) {
+      <button
+        mat-menu-item
+        menuTouchFix
+        (click)="runPluginTaskContextMenuEntry(entry)"
+      >
+        @if (entry.icon) {
+          <mat-icon>{{ entry.icon }}</mat-icon>
+        }
+        {{ entry.label }}
+      </button>
+    }
+  </ng-template>
 </mat-menu>
 
 <mat-menu #estimateMenu="matMenu">
@@ -384,6 +443,41 @@
       </button>
     }
   </ng-template>
+</mat-menu>
+
+<mat-menu #priorityMenu="matMenu">
+  <button
+    mat-menu-item
+    menuTouchFix
+    role="menuitemradio"
+    [attr.aria-checked]="!task.priority"
+    (click)="setPriority(null)"
+  >
+    <mat-icon>clear</mat-icon>
+    <span>{{ T.F.TASK.CMP.PRIORITY_NONE | translate }}</span>
+    @if (!task.priority) {
+      <div><mat-icon>check</mat-icon></div>
+    }
+  </button>
+  @for (level of PRIORITY_LEVELS; track level) {
+    <button
+      mat-menu-item
+      menuTouchFix
+      role="menuitemradio"
+      [attr.aria-checked]="task.priority === level"
+      (click)="setPriority(level)"
+    >
+      <task-priority-indicator
+        matMenuItemIcon
+        [priority]="level"
+        aria-hidden="true"
+      ></task-priority-indicator>
+      <span>{{ PRIORITY_LABEL_KEY[level] | translate }}</span>
+      @if (task.priority === level) {
+        <div><mat-icon>check</mat-icon></div>
+      }
+    </button>
+  }
 </mat-menu>
 
 <mat-menu #projectMenu="matMenu">

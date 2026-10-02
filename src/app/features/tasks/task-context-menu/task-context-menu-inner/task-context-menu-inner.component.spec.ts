@@ -27,6 +27,9 @@ import { DEFAULT_TASK, Task, TaskWithSubTasks } from '../../task.model';
 import { By } from '@angular/platform-browser';
 import { MatMenu } from '@angular/material/menu';
 import { TaskDuplicateService } from '../../task-duplicate.service';
+import { TaskMultiSelectService } from '../../task-multi-select.service';
+import { T } from '../../../../t.const';
+import { PluginTaskContextMenuRegistryService } from '../../../../plugins/plugin-task-context-menu-registry.service';
 
 const projectInTreeOrder = (id: string, title: string): Project =>
   ({
@@ -58,9 +61,13 @@ describe('TaskContextMenuInnerComponent', () => {
   beforeEach(async () => {
     taskService = jasmine.createSpyObj('TaskService', [
       'currentTaskId',
+      'selectedTaskId',
+      'setSelectedId',
       'moveToProject',
+      'remove',
       'getTasksWithSubTasksByRepeatCfgId$',
       'getArchiveTasksForRepeatCfgId',
+      'update',
     ]);
     taskService.currentTaskId.and.returnValue('some-id');
     taskDuplicateService = jasmine.createSpyObj<TaskDuplicateService>(
@@ -157,6 +164,26 @@ describe('TaskContextMenuInnerComponent', () => {
     store.resetSelectors();
   });
 
+  describe('enterSelectionMode()', () => {
+    it('enters touch selection mode with the task selected', () => {
+      const multiSelect = TestBed.inject(TaskMultiSelectService);
+      taskService.selectedTaskId.and.returnValue(null);
+      component.enterSelectionMode();
+      expect(multiSelect.isTouchSelectionMode()).toBeTrue();
+      expect(multiSelect.has('task-default')).toBeTrue();
+      expect(taskService.setSelectedId).not.toHaveBeenCalled();
+      multiSelect.clear();
+    });
+
+    it('closes an open detail panel first', () => {
+      const multiSelect = TestBed.inject(TaskMultiSelectService);
+      taskService.selectedTaskId.and.returnValue('other-task');
+      component.enterSelectionMode();
+      expect(taskService.setSelectedId).toHaveBeenCalledWith(null);
+      multiSelect.clear();
+    });
+  });
+
   describe('tree ordered dropdown data', () => {
     it('should expose move projects in the order provided by ProjectService', (done) => {
       component.taskSet = {
@@ -177,6 +204,174 @@ describe('TaskContextMenuInnerComponent', () => {
     it('should expose toggle tags in the order provided by TagService', () => {
       expect(component.toggleTagList().map((tag) => tag.id)).toEqual(['tag-b', 'tag-a']);
     });
+  });
+
+  describe('plugin task context menu entries', () => {
+    let registry: PluginTaskContextMenuRegistryService;
+
+    beforeEach(() => {
+      registry = TestBed.inject(PluginTaskContextMenuRegistryService);
+      registry.unregisterPlugin('plugin-a');
+    });
+
+    it('does not invoke plugin callbacks while rendering the menu', () => {
+      const onClick = jasmine.createSpy('onClick');
+      registry.register('plugin-a', {
+        id: 'action',
+        label: 'Run action',
+        onClick,
+      });
+
+      component.taskSet = {
+        ...DEFAULT_TASK,
+        id: 'task-1',
+      } as Task;
+      fixture.detectChanges();
+
+      expect(component.pluginTaskContextMenuEntries()).toHaveSize(1);
+      expect(onClick).not.toHaveBeenCalled();
+    });
+
+    it('passes only the exact task id when the plugin action is selected', async () => {
+      const onClick = jasmine.createSpy('onClick');
+      registry.register('plugin-a', {
+        id: 'action',
+        label: 'Run action',
+        onClick,
+      });
+      component.taskSet = {
+        ...DEFAULT_TASK,
+        id: 'task-1',
+      } as Task;
+
+      await component.runPluginTaskContextMenuEntry(
+        component.pluginTaskContextMenuEntries()[0],
+      );
+
+      expect(onClick).toHaveBeenCalledOnceWith({ taskId: 'task-1' });
+    });
+
+    it('renders the plugin submenu and runs the selected entry on click', fakeAsync(() => {
+      const onClick = jasmine.createSpy('onClick');
+      registry.register('plugin-a', {
+        id: 'action',
+        label: 'Run action',
+        onClick,
+      });
+      component.taskSet = {
+        ...DEFAULT_TASK,
+        id: 'task-1',
+      } as Task;
+      fixture.detectChanges();
+
+      const findMenuItem = (text: string): HTMLElement | undefined =>
+        Array.from(
+          document.querySelectorAll<HTMLElement>(
+            '.cdk-overlay-container [mat-menu-item]',
+          ),
+        ).find((el) => el.textContent?.includes(text));
+
+      component.contextMenuTrigger()?.openMenu();
+      fixture.detectChanges();
+      tick();
+      const submenuTrigger = findMenuItem(T.PLUGINS.TASK_CONTEXT_MENU_ACTIONS);
+      expect(submenuTrigger).toBeDefined();
+
+      submenuTrigger!.click();
+      fixture.detectChanges();
+      tick();
+      const entryButton = findMenuItem('Run action');
+      expect(entryButton).toBeDefined();
+
+      entryButton!.click();
+      flush();
+
+      expect(onClick).toHaveBeenCalledOnceWith({ taskId: 'task-1' });
+      component.contextMenuTrigger()?.closeMenu();
+      flush();
+    }));
+
+    it('uses SUBTASK filtering for tasks with a parent', () => {
+      registry.register('plugin-a', {
+        id: 'subtask-action',
+        label: 'Subtask action',
+        showFor: ['SUBTASK'],
+        onClick: () => undefined,
+      });
+
+      component.taskSet = {
+        ...DEFAULT_TASK,
+        id: 'subtask-1',
+        parentId: 'task-1',
+      } as Task;
+
+      expect(
+        component.pluginTaskContextMenuEntries().map((entry) => entry.entryId),
+      ).toEqual(['subtask-action']);
+    });
+  });
+
+  describe('priority submenu', () => {
+    const menuItems = (selector: string): HTMLElement[] =>
+      Array.from(
+        document.querySelectorAll<HTMLElement>(`.cdk-overlay-container ${selector}`),
+      );
+    const openPriorityMenu = (): HTMLElement[] => {
+      component.contextMenuTrigger()?.openMenu();
+      fixture.detectChanges();
+      tick();
+      const trigger = menuItems('[mat-menu-item]').find((el) =>
+        el.textContent?.trim().endsWith(T.F.TASK.CMP.PRIORITY),
+      );
+      expect(trigger).toBeDefined();
+      trigger!.click();
+      fixture.detectChanges();
+      tick();
+      return menuItems('[role="menuitemradio"]');
+    };
+    const closeMenus = (): void => {
+      component.contextMenuTrigger()?.closeMenu();
+      flush();
+    };
+
+    it('lists None, Low, Medium, High and checks only the current level', fakeAsync(() => {
+      component.taskSet = { ...DEFAULT_TASK, id: 'task-1', priority: 2 } as Task;
+      fixture.detectChanges();
+
+      const items = openPriorityMenu();
+
+      expect(items.map((el) => el.textContent)).toEqual([
+        jasmine.stringContaining(T.F.TASK.CMP.PRIORITY_NONE),
+        jasmine.stringContaining(T.F.TASK.CMP.PRIORITY_LOW),
+        jasmine.stringContaining(T.F.TASK.CMP.PRIORITY_MEDIUM),
+        jasmine.stringContaining(T.F.TASK.CMP.PRIORITY_HIGH),
+      ]);
+      expect(items.map((el) => el.getAttribute('aria-checked'))).toEqual([
+        'false',
+        'false',
+        'true',
+        'false',
+      ]);
+      expect(items[2].textContent).toContain('check');
+      // Opening focuses the current level, so Enter keeps it.
+      expect(document.activeElement).toBe(items[2]);
+      expect(items[1].querySelector('task-priority-indicator')).not.toBeNull();
+      closeMenus();
+    }));
+
+    it('sets the numeric level, and clears with null', fakeAsync(() => {
+      component.taskSet = { ...DEFAULT_TASK, id: 'task-1', priority: 2 } as Task;
+      fixture.detectChanges();
+
+      openPriorityMenu()[3].click();
+      flush();
+      expect(taskService.update).toHaveBeenCalledWith('task-1', { priority: 3 });
+
+      openPriorityMenu()[0].click();
+      flush();
+      expect(taskService.update).toHaveBeenCalledWith('task-1', { priority: null });
+      closeMenus();
+    }));
   });
 
   describe('duplicate()', () => {
@@ -233,6 +428,27 @@ describe('TaskContextMenuInnerComponent', () => {
       expect(taskDuplicateService.duplicate).toHaveBeenCalledOnceWith(
         mockTaskWithSubTasks,
       );
+    }));
+  });
+
+  describe('deleteTask()', () => {
+    // #9946: the selector returns undefined for a task that is gone from the
+    // store; removing an id-less stub used to wipe every top-level task.
+    it('removes nothing when the task is gone from the store', fakeAsync(() => {
+      component.task = {
+        ...DEFAULT_TASK,
+        id: 'GONE_ID',
+        projectId: 'P1',
+        subTaskIds: [],
+      };
+      store.overrideSelector(selectTaskByIdWithSubTaskData, undefined);
+
+      void (
+        component as unknown as { _performDelete: () => Promise<void> }
+      )._performDelete();
+      tick(50); // for the delay(50) in _getTaskWithSubtasks
+
+      expect(taskService.remove).not.toHaveBeenCalled();
     }));
   });
 
@@ -360,6 +576,38 @@ describe('TaskContextMenuInnerComponent', () => {
       component.focusFirstSubmenuItem(menu);
 
       expect(menu.focusFirstItem).toHaveBeenCalledWith('program');
+    });
+  });
+
+  describe('focusCheckedSubmenuItem()', () => {
+    const fakeItem = (
+      ariaChecked: string | null,
+    ): { focus: jasmine.Spy; _getHostElement: () => HTMLElement } => {
+      const el = document.createElement('button');
+      if (ariaChecked !== null) {
+        el.setAttribute('aria-checked', ariaChecked);
+      }
+      return { focus: jasmine.createSpy('focus'), _getHostElement: () => el };
+    };
+
+    it('focuses the checked item', () => {
+      const items = [fakeItem('false'), fakeItem('true'), fakeItem('false')];
+      const menu = { _allItems: items, focusFirstItem: jasmine.createSpy() };
+
+      component.focusCheckedSubmenuItem(menu as unknown as MatMenu);
+
+      expect(items[1].focus).toHaveBeenCalledWith('program');
+      expect(menu.focusFirstItem).not.toHaveBeenCalled();
+    });
+
+    it('falls back to the first item when nothing is checked', () => {
+      const items = [fakeItem(null), fakeItem('false')];
+      const menu = { _allItems: items, focusFirstItem: jasmine.createSpy() };
+
+      component.focusCheckedSubmenuItem(menu as unknown as MatMenu);
+
+      expect(menu.focusFirstItem).toHaveBeenCalledWith('program');
+      expect(items[0].focus).not.toHaveBeenCalled();
     });
   });
 

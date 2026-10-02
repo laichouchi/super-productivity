@@ -1,3 +1,5 @@
+import { TaskPriorityIndicatorComponent } from '../../task-priority-indicator/task-priority-indicator.component';
+import { TASK_PRIORITY_LABEL_KEY, TASK_PRIORITY_LEVELS } from '../../task-priority.const';
 import {
   AfterViewInit,
   ChangeDetectionStrategy,
@@ -9,6 +11,7 @@ import {
   Input,
   OnDestroy,
   output,
+  signal,
   viewChild,
   ViewEncapsulation,
 } from '@angular/core';
@@ -23,10 +26,9 @@ import {
 } from '@angular/material/menu';
 import { MatDivider } from '@angular/material/divider';
 import { ESTIMATE_OPTIONS } from '../../add-task-bar/add-task-bar.const';
-import { Task, TaskCopy, TaskWithSubTasks } from '../../task.model';
-import { EMPTY, forkJoin, from, Observable, of, ReplaySubject, Subject } from 'rxjs';
+import { Task, TaskPriority, TaskWithSubTasks } from '../../task.model';
+import { from, Observable, of, ReplaySubject, Subject } from 'rxjs';
 import {
-  concatMap,
   delay,
   distinctUntilChanged,
   first,
@@ -34,16 +36,14 @@ import {
   switchMap,
   take,
   takeUntil,
-  tap,
 } from 'rxjs/operators';
 import { Project } from '../../../project/project.model';
 import { TaskService } from '../../task.service';
-import { TaskRepeatCfgService } from '../../../task-repeat-cfg/task-repeat-cfg.service';
 import { MatDialog } from '@angular/material/dialog';
 import { IssueService } from '../../../issue/issue.service';
 import { SnackService } from '../../../../core/snack/snack.service';
 import { ProjectService } from '../../../project/project.service';
-import { _MISSING_PROJECT_, DEFAULT_PROJECT_ICON } from '../../../project/project.const';
+import { DEFAULT_PROJECT_ICON } from '../../../project/project.const';
 import { WorkContextService } from '../../../work-context/work-context.service';
 import { GlobalConfigService } from '../../../config/global-config.service';
 import { KeyboardConfig } from '@sp/keyboard-config';
@@ -52,7 +52,6 @@ import { DialogDeadlineComponent } from '../../dialog-deadline/dialog-deadline.c
 import { DialogTimeEstimateComponent } from '../../dialog-time-estimate/dialog-time-estimate.component';
 import { throttle } from '../../../../util/decorators';
 import { DialogConfirmComponent } from '../../../../ui/dialog-confirm/dialog-confirm.component';
-import { Update } from '@ngrx/entity';
 import { isTouchActive } from 'src/app/util/input-intent';
 import { T } from 'src/app/t.const';
 import { TranslateModule, TranslateService } from '@ngx-translate/core';
@@ -83,6 +82,13 @@ import { MenuTreeService } from '../../../menu-tree/menu-tree.service';
 import { SelectOptionRowComponent } from '../../../../ui/select-option-row/select-option-row.component';
 import { AddSubtaskInputService } from '../../add-subtask-input/add-subtask-input.service';
 import { TaskDuplicateService } from '../../task-duplicate.service';
+import { TaskMoveToProjectService } from '../../task-move-to-project.service';
+import { TaskMultiSelectService } from '../../task-multi-select.service';
+import {
+  PluginTaskContextMenuEntryView,
+  PluginTaskContextMenuRegistryService,
+} from '../../../../plugins/plugin-task-context-menu-registry.service';
+import { PluginTaskContextMenuTarget } from '@super-productivity/plugin-api';
 
 @Component({
   selector: 'task-context-menu-inner',
@@ -100,6 +106,7 @@ import { TaskDuplicateService } from '../../task-duplicate.service';
     IssueIconPipe,
     MenuTouchFixDirective,
     SelectOptionRowComponent,
+    TaskPriorityIndicatorComponent,
   ],
   templateUrl: './task-context-menu-inner.component.html',
   styleUrl: './task-context-menu-inner.component.scss',
@@ -109,7 +116,6 @@ import { TaskDuplicateService } from '../../task-duplicate.service';
 export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
   private readonly _datePipe = inject(LocaleDatePipe);
   private readonly _taskService = inject(TaskService);
-  private readonly _taskRepeatCfgService = inject(TaskRepeatCfgService);
   private readonly _matDialog = inject(MatDialog);
   private readonly _issueService = inject(IssueService);
   private readonly _elementRef = inject(ElementRef);
@@ -126,9 +132,18 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
   private readonly _menuTreeService = inject(MenuTreeService);
   private readonly _addSubtaskInputService = inject(AddSubtaskInputService);
   private readonly _taskDuplicateService = inject(TaskDuplicateService);
+  private readonly _taskMoveToProjectService = inject(TaskMoveToProjectService);
+  private readonly _taskMultiSelectService = inject(TaskMultiSelectService);
+  private readonly _pluginTaskContextMenuRegistry = inject(
+    PluginTaskContextMenuRegistryService,
+  );
+  private readonly _pluginTaskContextMenuTarget =
+    signal<PluginTaskContextMenuTarget>('TASK');
 
   protected readonly isTouchActive = isTouchActive;
   protected readonly T = T;
+  protected readonly PRIORITY_LEVELS = TASK_PRIORITY_LEVELS;
+  protected readonly PRIORITY_LABEL_KEY = TASK_PRIORITY_LABEL_KEY;
   readonly ESTIMATE_OPTIONS = ESTIMATE_OPTIONS;
   readonly DEFAULT_PROJECT_ICON = DEFAULT_PROJECT_ICON;
 
@@ -140,6 +155,9 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
   );
   readonly isFocusModeEnabled = computed(
     () => this._globalConfigService.appFeatures().isFocusModeEnabled,
+  );
+  readonly pluginTaskContextMenuEntries = computed(() =>
+    this._pluginTaskContextMenuRegistry.entriesFor(this._pluginTaskContextMenuTarget()),
   );
 
   // eslint-disable-next-line @angular-eslint/no-output-native
@@ -158,6 +176,8 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
   isCurrent: boolean = false;
   isBacklog: boolean = false;
   isInSubTaskList: boolean = false;
+  /** Multi-select needs a rendered `<task>` row outside the detail panel. */
+  isInTaskRow: boolean = false;
 
   private _task$: ReplaySubject<TaskWithSubTasks | Task> = new ReplaySubject(1);
   issueUrl$: Observable<string | null> = this._task$.pipe(
@@ -199,6 +219,7 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
   //  Accessor inputs cannot be migrated as they are too complex.
   @Input('task') set taskSet(v: TaskWithSubTasks | Task) {
     this.task = v;
+    this._pluginTaskContextMenuTarget.set(v.parentId ? 'SUBTASK' : 'TASK');
     this.isCurrent = this._taskService.currentTaskId() === v.id;
     this._task$.next(v);
   }
@@ -209,6 +230,11 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
     // top/bottom is only offered where that order is on screen — a subtask
     // rendered flat in a tag or Today list would reorder invisibly.
     this.isInSubTaskList = !!this._elementRef.nativeElement.closest('.sub-tasks');
+    const host = this._elementRef.nativeElement as HTMLElement;
+    this.isInTaskRow =
+      !!host.closest(
+        'task, [data-board-selection-scope] planner-task[data-task-selectable="true"]',
+      ) && !host.closest('task-detail-panel');
 
     setTimeout(() => {
       if (!this._isOpenedFromKeyboard) {
@@ -390,6 +416,39 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
     menu.focusFirstItem('program');
   }
 
+  /**
+   * For radio-style submenus: focus the checked item so opening the menu and
+   * pressing Enter keeps the current choice. Falls back to the first item.
+   * `MatMenuItem.focus()` also moves the menu's key manager to that item.
+   */
+  focusCheckedSubmenuItem(menu: MatMenu): void {
+    const checked = menu._allItems.find(
+      (item) => item._getHostElement().getAttribute('aria-checked') === 'true',
+    );
+    if (checked) {
+      checked.focus('program');
+    } else {
+      menu.focusFirstItem('program');
+    }
+  }
+
+  /** Touch entry point into multi-selection (there is no modifier key). */
+  enterSelectionMode(): void {
+    // The detail panel is single-task UI (a bottom sheet on touch); close it.
+    if (this._taskService.selectedTaskId()) {
+      this._taskService.setSelectedId(null);
+    }
+    this._taskMultiSelectService.enterTouchSelectionMode(this.task.id);
+  }
+
+  runPluginTaskContextMenuEntry(entry: PluginTaskContextMenuEntryView): Promise<void> {
+    return this._pluginTaskContextMenuRegistry.execute(
+      entry.pluginId,
+      entry.entryId,
+      this.task.id,
+    );
+  }
+
   goToFocusMode(): void {
     this._taskService.setCurrentId(this.task.id);
     this._store.dispatch(showFocusOverlay());
@@ -465,6 +524,9 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
   private async _performDelete(): Promise<void> {
     this._isTaskDeleteTriggered = true;
     const taskWithSubTasks = await this._getTaskWithSubtasks();
+    if (!taskWithSubTasks) {
+      return;
+    }
     this._taskService.remove(taskWithSubTasks);
   }
 
@@ -492,6 +554,13 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
     this._taskService.update(this.task.id, { timeEstimate: ms });
   }
 
+  setPriority(priority: TaskPriority | null): void {
+    if (priority === (this.task.priority ?? null)) {
+      return;
+    }
+    this._taskService.update(this.task.id, { priority });
+  }
+
   addSubTask(): void {
     this._addSubtaskInputService.requestOpen(this.task.parentId || this.task.id);
   }
@@ -500,6 +569,9 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
     const taskWithSubtasks = this.task.subTaskIds.length
       ? await this._getTaskWithSubtasks()
       : { ...this.task, subTasks: [] };
+    if (!taskWithSubtasks) {
+      return;
+    }
     this._taskDuplicateService.duplicate(taskWithSubtasks);
   }
 
@@ -580,110 +652,16 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
       });
   }
 
-  // TODO move to service
   async moveTaskToProject(projectId: string): Promise<void> {
     if (projectId === this.task.projectId) {
       return;
-    } else if (!this.task.repeatCfgId) {
-      const taskWithSubTasks = await this._getTaskWithSubtasks();
-      this._taskService.moveToProject(taskWithSubTasks, projectId);
-      this.onClose();
-    } else {
-      const taskWithSubTasks = await this._getTaskWithSubtasks();
-
-      forkJoin([
-        this._taskRepeatCfgService
-          .getTaskRepeatCfgByIdAllowUndefined$(this.task.repeatCfgId)
-          .pipe(first()),
-        this._taskService
-          .getTasksWithSubTasksByRepeatCfgId$(this.task.repeatCfgId)
-          .pipe(first()),
-        this._taskService.getArchiveTasksForRepeatCfgId(this.task.repeatCfgId),
-        this._projectService.getByIdOnce$(projectId),
-      ])
-        .pipe(
-          concatMap(
-            ([
-              reminderCfg,
-              nonArchiveInstancesWithSubTasks,
-              archiveInstances,
-              targetProject,
-            ]) => {
-              TaskLog.log({
-                hasReminderCfg: !!reminderCfg,
-                nonArchiveInstanceCount: nonArchiveInstancesWithSubTasks.length,
-                archiveInstanceCount: archiveInstances.length,
-              });
-
-              // Repeat config was deleted (e.g. via cross-client sync) but the task
-              // still references it — treat it as a plain task move instead of
-              // crashing on the missing config. (#8715)
-              if (!reminderCfg) {
-                this._taskService.moveToProject(taskWithSubTasks, projectId);
-                this.onClose();
-                return EMPTY;
-              }
-
-              // if there is only a single instance (probably just created) than directly update the task repeat cfg
-              if (
-                nonArchiveInstancesWithSubTasks.length === 1 &&
-                archiveInstances.length === 0
-              ) {
-                this._taskRepeatCfgService.updateTaskRepeatCfg(reminderCfg.id, {
-                  projectId,
-                });
-                this._taskService.moveToProject(taskWithSubTasks, projectId);
-                this.onClose();
-                return EMPTY;
-              }
-
-              return this._matDialog
-                .open(DialogConfirmComponent, {
-                  data: {
-                    okTxt: T.F.TASK_REPEAT.D_CONFIRM_MOVE_TO_PROJECT.OK,
-                    message: T.F.TASK_REPEAT.D_CONFIRM_MOVE_TO_PROJECT.MSG,
-                    translateParams: {
-                      projectName: targetProject?.title ?? _MISSING_PROJECT_,
-                      tasksNr:
-                        nonArchiveInstancesWithSubTasks.length + archiveInstances.length,
-                    },
-                  },
-                })
-                .afterClosed()
-                .pipe(
-                  tap((isConfirm) => {
-                    if (isConfirm) {
-                      this._taskRepeatCfgService.updateTaskRepeatCfg(reminderCfg.id, {
-                        projectId,
-                      });
-                      nonArchiveInstancesWithSubTasks.forEach((nonArchiveTask) => {
-                        this._taskService.moveToProject(nonArchiveTask, projectId);
-                      });
-
-                      const archiveUpdates: Update<TaskCopy>[] = [];
-                      archiveInstances.forEach((archiveTask) => {
-                        archiveUpdates.push({
-                          id: archiveTask.id,
-                          changes: { projectId },
-                        });
-                        if (archiveTask.subTaskIds.length) {
-                          archiveTask.subTaskIds.forEach((subId) => {
-                            archiveUpdates.push({
-                              id: subId,
-                              changes: { projectId },
-                            });
-                          });
-                        }
-                      });
-                      this._taskService.updateArchiveTasks(archiveUpdates);
-                    }
-                  }),
-                );
-            },
-          ),
-        )
-        .subscribe(() => this.onClose());
     }
+    const taskWithSubTasks = await this._getTaskWithSubtasks();
+    if (!taskWithSubTasks) {
+      return;
+    }
+    await this._taskMoveToProjectService.moveToProject(taskWithSubTasks, projectId);
+    this.onClose();
   }
 
   moveToBacklog(): void {
@@ -719,7 +697,7 @@ export class TaskContextMenuInnerComponent implements AfterViewInit, OnDestroy {
       });
   }
 
-  private async _getTaskWithSubtasks(): Promise<TaskWithSubTasks> {
+  private async _getTaskWithSubtasks(): Promise<TaskWithSubTasks | undefined> {
     return await this._store
       .select(selectTaskByIdWithSubTaskData, { id: this.task.id })
       .pipe(

@@ -46,9 +46,9 @@
     [style.height]="iosShellHeight()"
     [style.min-height]="iosShellHeight()"
     [class.has-mobile-bottom-nav]="isShowMobileButtonNav()"
+    [class.is-multi-selecting]="isMultiSelecting()"
     [class.has-vertical-action-bar]="isVerticalActionBar()"
     [class.app-entrance]="isAppEntrance()"
-    [class.is-onboarding]="isShowOnboardingPresets()"
     [dir]="isRTL ? 'rtl' : 'ltr'"
   >
     <magic-side-nav
@@ -77,6 +77,7 @@
         </div>
       </right-panel>
       <global-progress-bar></global-progress-bar>
+      <task-multi-select-bar></task-multi-select-bar>
     </main>
 
     <!-- Mobile Bottom Navigation -->
@@ -89,13 +90,6 @@
   </div>
 }
 <!-- -->
-
-@if (isShowOnboardingPresets()) {
-  <onboarding-preset-selection
-    (presetSelected)="onPresetSelected()"
-    (dismissed)="onOnboardingDismissed()"
-  ></onboarding-preset-selection>
-}
 
 @if (onboardingHintService.currentStep()) {
   <onboarding-hint></onboarding-hint>

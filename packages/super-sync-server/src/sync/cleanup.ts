@@ -1,6 +1,7 @@
 import { getSyncService } from './sync.service';
 import { Logger } from '../logger';
 import { DEFAULT_SYNC_CONFIG, MS_PER_DAY } from './sync.types';
+import { MIN_CHECKPOINT_SAFE_APP_VERSION } from './checkpoint-gate';
 
 let cleanupTimer: NodeJS.Timeout | null = null;
 let initialCleanupTimer: NodeJS.Timeout | null = null;
@@ -54,6 +55,19 @@ const runDailyCleanup = async (): Promise<void> => {
     }
   } catch (error) {
     Logger.error(`Cleanup [stale-devices] failed: ${error}`);
+  }
+
+  // 2b. Checkpoint diagnostics (#9962), read-only. Aged-out devices and clients
+  // arriving during checkpoint acceptance need a separate compatibility design.
+  try {
+    const gate = await syncService.summarizeCheckpointGate(cutoffTime);
+    Logger.info(
+      `Cleanup [checkpoint-gate]: ${gate.safeAccounts} of ${gate.totalAccounts} account(s) ` +
+        `with devices inside retention report only versions >= ${MIN_CHECKPOINT_SAFE_APP_VERSION}; ` +
+        `${gate.unversionedDevices} device(s) report no version; diagnostic only.`,
+    );
+  } catch (error) {
+    Logger.error(`Cleanup [checkpoint-gate] failed: ${error}`);
   }
 
   // 3. Clean up expired rate limit counters

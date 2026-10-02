@@ -37,6 +37,7 @@ import { LanguageService } from 'src/app/core/language/language.service';
 import { TranslateService } from '@ngx-translate/core';
 import { T } from '../../t.const';
 import { SnackService } from '../../core/snack/snack.service';
+import { parseDbDateStr } from '../../util/parse-db-date-str';
 
 const GROUP_OPTIONS_NO_PROJECT = OPTIONS.group.list.filter(
   (opt) => opt.type !== GROUP_OPTION_TYPE.project,
@@ -200,6 +201,7 @@ export class TaskViewCustomizerService {
       : DEFAULT_OPTIONS.filter;
   }
 
+  // Like _sanitizeFilter, re-resolve the option so persisted labels stay current.
   private _sanitizeSort(stored: SortOption | undefined): SortOption {
     if (!stored) return DEFAULT_OPTIONS.sort;
 
@@ -309,6 +311,12 @@ export class TaskViewCustomizerService {
             : 0;
           return spent >= +value;
         });
+      case FILTER_OPTION_TYPE.priority:
+        if (value === FILTER_COMMON.NOT_SPECIFIED) {
+          return tasks.filter((t) => !t.priority);
+        }
+
+        return tasks.filter((t) => t.priority === +value);
       default:
         return tasks;
     }
@@ -372,6 +380,18 @@ export class TaskViewCustomizerService {
 
       case SORT_OPTION_TYPE.tag: {
         return tasksCopy.sort(sortByTagRank);
+      }
+
+      case SORT_OPTION_TYPE.priority: {
+        const getPriorityRank = (priority: TaskWithSubTasks['priority']): number => {
+          if (priority === 3) return 0;
+          if (priority === 2) return 1;
+          if (priority === 1) return 2;
+          return 3;
+        };
+        return tasksCopy.sort(
+          (a, b) => (getPriorityRank(a.priority) - getPriorityRank(b.priority)) * factor,
+        );
       }
 
       case SORT_OPTION_TYPE.creationDate:
@@ -652,11 +672,25 @@ export class TaskViewCustomizerService {
       t: TaskWithSubTasks,
     ) => [string | undefined | null, number | undefined | null],
   ): TaskWithSubTasks[] {
+    const toDate = (
+      day: string | undefined | null,
+      withTime: number | undefined | null,
+    ): Date | null => {
+      if (withTime) return new Date(withTime);
+      if (day) {
+        // A date-only value means "by the end of that day" for sorting (#9828).
+        const date = parseDbDateStr(day);
+        date.setHours(23, 59, 59, 999);
+        return date;
+      }
+      return null;
+    };
+
     return tasks.sort((a, b) => {
       const [dayA, withTimeA] = getFields(a);
       const [dayB, withTimeB] = getFields(b);
-      const dateA = withTimeA ? new Date(withTimeA) : dayA ? new Date(dayA) : null;
-      const dateB = withTimeB ? new Date(withTimeB) : dayB ? new Date(dayB) : null;
+      const dateA = toDate(dayA, withTimeA);
+      const dateB = toDate(dayB, withTimeB);
 
       if (dateA === null && dateB === null) return 0;
       if (dateA === null) return 1 * factor;
@@ -676,7 +710,7 @@ export class TaskViewCustomizerService {
     if (isSame) {
       // reverse sorting
       nextSort.order =
-        nextSort.order === SORT_ORDER.ASC ? SORT_ORDER.DESC : SORT_ORDER.ASC;
+        this.selectedSort().order === SORT_ORDER.ASC ? SORT_ORDER.DESC : SORT_ORDER.ASC;
     }
     this.selectedSort.set(nextSort);
   }

@@ -358,6 +358,125 @@ describe('SupersededOperationResolverService', () => {
       expect(appendedOp.timestamp).toBe(1000); // Preserved from original
     });
 
+    it('re-uploads only the fields a readable edit wrote, as a patch (#10379)', async () => {
+      const supersededOp = createMockOperation(
+        'op-1',
+        'TASK',
+        'task-1',
+        { clientA: 5 },
+        1000,
+      );
+      supersededOp.actionType = ActionType.TASK_SHARED_UPDATE;
+      supersededOp.payload = {
+        actionPayload: {
+          task: { id: 'task-1', changes: { title: 'Renamed', notes: undefined } },
+          clearedFields: ['notes'],
+        },
+        entityChanges: [],
+      };
+      mockVectorClockService.getCurrentVectorClock.and.resolveTo({ clientA: 3 });
+      // Another device's done toggle is in state; a replace would re-send it.
+      mockConflictResolutionService.getCurrentEntityState.and.resolveTo({
+        id: 'task-1',
+        title: 'Renamed',
+        isDone: true,
+      });
+
+      await service.resolveSupersededLocalOps([{ opId: 'op-1', op: supersededOp }]);
+
+      expect(mockConflictResolutionService.createLWWUpdateOp).toHaveBeenCalledWith(
+        'TASK',
+        'task-1',
+        { title: 'Renamed', notes: undefined },
+        TEST_CLIENT_ID,
+        jasmine.any(Object),
+        1000,
+        'patch',
+        undefined,
+        true,
+      );
+      expectAtomicRejection(['op-1']);
+    });
+
+    // Released receivers (v18.15.0-v19.1.0) replace a habit with a 'replace'
+    // snapshot that cannot carry its `type`; repair then resets it.
+    it('re-uploads a superseded habit snapshot as a patch', async () => {
+      const habit = { id: 'cnt-1', title: 'Habit', type: 'StopWatch', countOnDay: {} };
+      mockVectorClockService.getCurrentVectorClock.and.resolveTo({});
+      mockConflictResolutionService.getCurrentEntityState.and.resolveTo(habit);
+      mockConflictResolutionService.createLWWUpdateOp.and.callFake(
+        (entityType, entityId, entityState, clientId, vectorClock, timestamp, mode) => ({
+          ...createMockOperation('replacement', entityType, entityId, vectorClock),
+          actionType: `[${entityType}] LWW Update` as ActionType,
+          payload: {
+            actionPayload: entityState as Record<string, unknown>,
+            entityChanges: [],
+            lwwUpdateMode: mode ?? 'replace',
+          },
+          clientId,
+          timestamp,
+        }),
+      );
+
+      await service.resolveSupersededLocalOps([
+        {
+          opId: 'op-1',
+          op: createMockOperation('op-1', 'SIMPLE_COUNTER', 'cnt-1', { clientA: 1 }),
+        },
+      ]);
+
+      const appendedOp = mockOpLogStore.appendWithVectorClockOverwrite.calls.first()
+        .args[0] as Operation;
+      expect(appendedOp.payload).toEqual(
+        jasmine.objectContaining({ actionPayload: habit, lwwUpdateMode: 'patch' }),
+      );
+    });
+
+    // Receivers ignore a marked patch for an absent habit, so a recreation is
+    // marked first and then stays a replace.
+    it('re-uploads a superseded habit recreation as a marked replace', async () => {
+      const habit = { id: 'cnt-1', title: 'Habit', type: 'StopWatch', countOnDay: {} };
+      mockVectorClockService.getCurrentVectorClock.and.resolveTo({});
+      mockConflictResolutionService.getCurrentEntityState.and.resolveTo(habit);
+      mockConflictResolutionService.createLWWUpdateOp.and.callFake(
+        (entityType, entityId, entityState, clientId, vectorClock, timestamp, mode) => ({
+          ...createMockOperation('replacement', entityType, entityId, vectorClock),
+          actionType: `[${entityType}] LWW Update` as ActionType,
+          payload: {
+            actionPayload: entityState as Record<string, unknown>,
+            entityChanges: [],
+            lwwUpdateMode: mode ?? 'replace',
+          },
+          clientId,
+          timestamp,
+        }),
+      );
+      const supersededRecreation: Operation = {
+        ...createMockOperation('op-1', 'SIMPLE_COUNTER', 'cnt-1', { clientA: 1 }),
+        actionType: '[SIMPLE_COUNTER] LWW Update' as ActionType,
+        payload: {
+          actionPayload: habit,
+          entityChanges: [],
+          lwwUpdateMode: 'replace',
+          recreatesEntityAfterDelete: true,
+        },
+      };
+
+      await service.resolveSupersededLocalOps([
+        { opId: 'op-1', op: supersededRecreation },
+      ]);
+
+      const appendedOp = mockOpLogStore.appendWithVectorClockOverwrite.calls.first()
+        .args[0] as Operation;
+      expect(appendedOp.payload).toEqual(
+        jasmine.objectContaining({
+          actionPayload: habit,
+          lwwUpdateMode: 'replace',
+          recreatesEntityAfterDelete: true,
+        }),
+      );
+    });
+
     it('preserves recreate guards and appends their relationship follow-ups (#8997)', async () => {
       const supersededOp: Operation = {
         ...createMockOperation('op-1', 'TASK', 'task-1', { clientA: 5 }, 1_000),
@@ -766,8 +885,8 @@ describe('SupersededOperationResolverService', () => {
       await service.resolveSupersededLocalOps([{ opId: 'op-1', op: supersededOp }]);
 
       // SPAP-15: the LWW_CONFLICTS_AUTO_RESOLVED snack was replaced by the
-      // journal-driven summary banner. Superseded-merge ops are self-healing
-      // local wins and are not journaled, so no count snack fires here.
+      // quiet resolution path. Superseded-merge ops are self-healing
+      // local wins, so no count snack fires here.
       expect(mockSnackService.open).not.toHaveBeenCalledWith(
         jasmine.objectContaining({
           translateParams: { localWins: 1, remoteWins: 0 },
@@ -2292,6 +2411,80 @@ describe('SupersededOperationResolverService', () => {
       });
     });
 
+    describe('restoreTask operation handling (#10196)', () => {
+      const RESTORE_TO_TODAY = { today: '2026-09-25', startOfNextDayDiffMs: 0 };
+      const createRestoreOp = (): Operation => ({
+        id: 'op-restore',
+        actionType: ActionType.TASK_SHARED_RESTORE,
+        opType: OpType.Update,
+        entityType: 'TASK',
+        entityId: 'task-1',
+        payload: {
+          actionPayload: {
+            task: { id: 'task-1', title: 'Stale', subTaskIds: ['sub-1'] },
+            subTasks: [{ id: 'sub-1', title: 'Stale sub', parentId: 'task-1' }],
+            restoreToToday: RESTORE_TO_TODAY,
+          },
+          entityChanges: [],
+        },
+        clientId: 'original-client',
+        vectorClock: { clientA: 5 },
+        timestamp: 1000,
+        schemaVersion: 1,
+      });
+      const liveTask = { id: 'task-1', title: 'Live', subTaskIds: ['sub-1'] };
+      const liveSubTask = { id: 'sub-1', title: 'Live sub', parentId: 'task-1' };
+
+      beforeEach(() => {
+        mockConflictResolutionService.getCurrentEntityState.and.callFake(
+          async (_type: EntityType, id: string) =>
+            [liveTask, liveSubTask].find((task) => task.id === id),
+        );
+      });
+
+      it('re-creates a sole superseded restoreTask as restoreTask from live state', async () => {
+        const result = await service.resolveSupersededLocalOps([
+          { opId: 'op-restore', op: createRestoreOp() },
+        ]);
+
+        expect(result).toBe(1);
+        expectAtomicRejection(['op-restore']);
+        expect(mockConflictResolutionService.createLWWUpdateOp).not.toHaveBeenCalled();
+        const appendedOp = mockOpLogStore.appendWithVectorClockOverwrite.calls.first()
+          .args[0] as Operation;
+        expect(appendedOp.actionType).toBe(ActionType.TASK_SHARED_RESTORE);
+        expect(appendedOp.opType).toBe(OpType.Update);
+        expect(appendedOp.entityId).toBe('task-1');
+        expect(appendedOp.id).not.toBe('op-restore');
+        expect(appendedOp.clientId).toBe(TEST_CLIENT_ID);
+        expect(appendedOp.vectorClock).toEqual({ clientA: 5, [TEST_CLIENT_ID]: 1 });
+        expect(appendedOp.timestamp).toBe(1000);
+        expect(appendedOp.payload).toEqual({
+          actionPayload: {
+            task: liveTask,
+            subTasks: [liveSubTask],
+          },
+          entityChanges: [],
+        });
+      });
+
+      it('keeps the LWW snapshot path when later edits share the restored entity', async () => {
+        // A semantic restore is idempotent on a receiver where the task is
+        // already active, so it could not carry the later edit there.
+        const laterEdit = createMockOperation('op-edit', 'TASK', 'task-1', {
+          clientA: 6,
+        });
+
+        await service.resolveSupersededLocalOps([
+          { opId: 'op-restore', op: createRestoreOp() },
+          { opId: 'op-edit', op: laterEdit },
+        ]);
+
+        expect(mockConflictResolutionService.createLWWUpdateOp).toHaveBeenCalledTimes(1);
+        expectAtomicRejection(['op-restore', 'op-edit']);
+      });
+    });
+
     describe('DELETE operation handling', () => {
       const createMockDeleteOperation = (
         id: string,
@@ -2484,7 +2677,7 @@ describe('SupersededOperationResolverService', () => {
         expect(updateOp?.opType).toBe(OpType.Update);
       });
 
-      it('no longer emits a bare count snack for DELETE ops (SPAP-15 journal-driven banner)', async () => {
+      it('keeps self-healing DELETE replacements quiet', async () => {
         const supersededDeleteOp = createMockDeleteOperation('op-1', 'TASK', 'task-1', {
           clientA: 1,
         });
@@ -2495,8 +2688,7 @@ describe('SupersededOperationResolverService', () => {
           { opId: 'op-1', op: supersededDeleteOp },
         ]);
 
-        // SPAP-15: the bare count snack was replaced by the journal-driven summary
-        // banner. Superseded self-heals are not journaled, so no count notification
+        // Superseded self-heals are routine, so no count notification
         // fires for them (behavior change — flagged for review).
         expect(mockSnackService.open).not.toHaveBeenCalledWith(
           jasmine.objectContaining({

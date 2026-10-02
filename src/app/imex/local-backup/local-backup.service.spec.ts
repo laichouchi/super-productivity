@@ -1,6 +1,7 @@
 import { fakeAsync, flushMicrotasks, TestBed, tick } from '@angular/core/testing';
 import { BehaviorSubject, of, Subject } from 'rxjs';
 import { LocalBackupService } from './local-backup.service';
+import { LocalBackupMeta } from './local-backup.model';
 import { GlobalConfigService } from '../../features/config/global-config.service';
 import { StateSnapshotService } from '../../op-log/backup/state-snapshot.service';
 import { BackupService } from '../../op-log/backup/backup.service';
@@ -17,6 +18,7 @@ import { Action } from '@ngrx/store';
 import { DEFAULT_MAX_BACKUP_FILES } from '../../../../electron/shared-with-frontend/backup-file-cleanup.util';
 import { LS } from '../../core/persistence/storage-keys.const';
 import { Log } from '../../core/log';
+import { BackupRepairFailedError } from '../../op-log/core/errors/sync-errors';
 
 const BACKUP_INTERVAL = 5 * 60 * 1000;
 const DATA_CHANGE_DEBOUNCE = 30 * 1000;
@@ -840,6 +842,126 @@ describe('LocalBackupService', () => {
     });
   });
 
+  describe('informed Electron restore prompt (#9945)', () => {
+    type LocalBackupServiceWithElectronPrompt = {
+      _restoreElectronPromptMsg: (
+        backupMeta: LocalBackupMeta,
+        backupData: string,
+      ) => string;
+    };
+    const META: LocalBackupMeta = {
+      name: '2026-09-05_162948.json',
+      path: '/backups/2026-09-05_162948.json',
+      folder: '/backups',
+      created: 1757090988000,
+    };
+    const promptMsg = (backupData: string): string =>
+      (
+        service as unknown as LocalBackupServiceWithElectronPrompt
+      )._restoreElectronPromptMsg(META, backupData);
+
+    it('names the task and project counts when the backup parses', () => {
+      translateServiceSpy.instant.and.returnValue('msg');
+
+      promptMsg(
+        JSON.stringify({
+          task: { ids: ['a', 'b'], entities: {} },
+          project: { ids: ['p1'], entities: {} },
+        }),
+      );
+
+      expect(translateServiceSpy.instant).toHaveBeenCalledWith(
+        T.CONFIRM.RESTORE_FILE_BACKUP_WITH_COUNTS,
+        {
+          dir: '/backups',
+          from: new Date(META.created).toLocaleString(),
+          tasks: 2,
+          projects: 1,
+        },
+      );
+    });
+
+    it('falls back to the count-less prompt for an unparseable backup', () => {
+      translateServiceSpy.instant.and.returnValue('msg');
+
+      promptMsg('{corrupt');
+
+      expect(translateServiceSpy.instant).toHaveBeenCalledWith(
+        T.CONFIRM.RESTORE_FILE_BACKUP,
+        { dir: '/backups', from: new Date(META.created).toLocaleString() },
+      );
+    });
+
+    describe('_askForElectronBackupRestore()', () => {
+      type LocalBackupServiceWithElectronRestore = {
+        _askForElectronBackupRestore: () => Promise<void>;
+      };
+      const BACKUP_STR = JSON.stringify({
+        task: { ids: ['a'], entities: {} },
+        project: { ids: [], entities: {} },
+      });
+      const restore = (): Promise<void> =>
+        (
+          service as unknown as LocalBackupServiceWithElectronRestore
+        )._askForElectronBackupRestore();
+
+      beforeEach(() => {
+        translateServiceSpy.instant.and.returnValue('msg');
+        backupServiceSpy.importCompleteBackup.and.resolveTo();
+        (window.confirm as jasmine.Spy).calls.reset();
+      });
+
+      it('imports the newest backup when the user confirms', async () => {
+        spyOn(service, 'checkBackupAvailable').and.resolveTo(META);
+        spyOn(service, 'loadBackupElectron').and.resolveTo(BACKUP_STR);
+        (window.confirm as jasmine.Spy).and.returnValue(true);
+
+        await restore();
+
+        // Own backup: restored even if still invalid after repair (#8279).
+        expect(backupServiceSpy.importCompleteBackup).toHaveBeenCalledWith(
+          jasmine.any(Object),
+          false,
+          true,
+          true,
+          false,
+          undefined,
+          true,
+        );
+      });
+
+      it('does not import when the user declines', async () => {
+        spyOn(service, 'checkBackupAvailable').and.resolveTo(META);
+        spyOn(service, 'loadBackupElectron').and.resolveTo(BACKUP_STR);
+        (window.confirm as jasmine.Spy).and.returnValue(false);
+
+        await restore();
+
+        expect(backupServiceSpy.importCompleteBackup).not.toHaveBeenCalled();
+      });
+
+      it('does not prompt when no backup is available', async () => {
+        spyOn(service, 'checkBackupAvailable').and.resolveTo(false);
+        const loadSpy = spyOn(service, 'loadBackupElectron');
+
+        await restore();
+
+        expect(loadSpy).not.toHaveBeenCalled();
+        expect(window.confirm).not.toHaveBeenCalled();
+      });
+
+      it('stays silent when the newest backup cannot be read', async () => {
+        spyOn(service, 'checkBackupAvailable').and.resolveTo(META);
+        spyOn(service, 'loadBackupElectron').and.rejectWith(new Error('EACCES'));
+
+        await restore();
+
+        expect(window.confirm).not.toHaveBeenCalled();
+        expect(backupServiceSpy.importCompleteBackup).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   describe('import backup', () => {
     it('should import with force conflict to reset vector clock', async () => {
       backupServiceSpy.importCompleteBackup.and.resolveTo();
@@ -850,6 +972,9 @@ describe('LocalBackupService', () => {
         jasmine.any(Object),
         false,
         true,
+        true,
+        false,
+        undefined,
         true,
       );
     });
@@ -873,6 +998,20 @@ describe('LocalBackupService', () => {
       await (service as any)._importBackup(JSON.stringify({ task: { ids: [] } }));
 
       expect(localDraftServiceSpy.deleteAllDrafts).not.toHaveBeenCalled();
+    });
+
+    it('should explain an unrepairable backup instead of the generic error (#8279)', async () => {
+      backupServiceSpy.importCompleteBackup.and.rejectWith(new BackupRepairFailedError());
+
+      const didImport = await (service as any)._importBackup(
+        JSON.stringify({ task: { ids: [] } }),
+      );
+
+      expect(didImport).toBe(false);
+      expect(snackServiceSpy.open).toHaveBeenCalledWith({
+        type: 'ERROR',
+        msg: T.FILE_IMEX.S_ERR_IMPORT_UNREPAIRABLE,
+      });
     });
   });
 
@@ -914,6 +1053,9 @@ describe('LocalBackupService', () => {
         }),
         false,
         true,
+        true,
+        false,
+        undefined,
         true,
       );
       expect(snackServiceSpy.open).toHaveBeenCalledWith({
@@ -1029,6 +1171,9 @@ describe('LocalBackupService', () => {
         }),
         false,
         true,
+        true,
+        false,
+        undefined,
         true,
       );
       expect(snackServiceSpy.open).toHaveBeenCalledWith({

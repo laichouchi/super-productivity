@@ -2,6 +2,7 @@
 // Active tests for setCounter fix (issue #5812)
 import { TestBed } from '@angular/core/testing';
 import { MockStore, provideMockStore } from '@ngrx/store/testing';
+import { selectTaskByIdWithSubTaskData } from '../features/tasks/store/task.selectors';
 import { of } from 'rxjs';
 import { PluginBridgeService } from './plugin-bridge.service';
 import { PluginShortcutCfg } from '@super-productivity/plugin-api';
@@ -42,6 +43,7 @@ import { PluginDialogComponent } from './ui/plugin-dialog/plugin-dialog.componen
 import { T } from '../t.const';
 import { INBOX_PROJECT } from '../features/project/project.const';
 import { Project } from '../features/project/project.model';
+import { PluginTaskContextMenuRegistryService } from './plugin-task-context-menu-registry.service';
 import { PluginManifest } from '@super-productivity/plugin-api';
 
 describe('PluginBridgeService - Counter Methods', () => {
@@ -49,6 +51,7 @@ describe('PluginBridgeService - Counter Methods', () => {
   let store: MockStore;
   let dispatchSpy: jasmine.Spy;
   let dataInitService: jasmine.SpyObj<DataInitService>;
+  let taskContextMenuRegistry: jasmine.SpyObj<PluginTaskContextMenuRegistryService>;
 
   const mockExistingCounter: SimpleCounter = {
     ...EMPTY_SIMPLE_COUNTER,
@@ -62,6 +65,10 @@ describe('PluginBridgeService - Counter Methods', () => {
   beforeEach(() => {
     const dataInitServiceSpy = jasmine.createSpyObj('DataInitService', ['reInit']);
     dataInitServiceSpy.reInit.and.resolveTo();
+    taskContextMenuRegistry = jasmine.createSpyObj(
+      'PluginTaskContextMenuRegistryService',
+      ['register', 'unregisterPlugin'],
+    );
 
     TestBed.configureTestingModule({
       providers: [
@@ -106,6 +113,10 @@ describe('PluginBridgeService - Counter Methods', () => {
         },
         { provide: PluginHttpService, useValue: {} },
         { provide: DataInitService, useValue: dataInitServiceSpy },
+        {
+          provide: PluginTaskContextMenuRegistryService,
+          useValue: taskContextMenuRegistry,
+        },
       ],
     });
 
@@ -334,6 +345,37 @@ describe('PluginBridgeService - Counter Methods', () => {
     });
   });
 
+  describe('task context menu registrations', () => {
+    const manifest = {
+      id: 'test-plugin',
+      name: 'Test Plugin',
+    } as PluginManifest;
+    const entry = {
+      id: 'set-color',
+      label: 'Set color',
+      onClick: () => undefined,
+    };
+
+    it('binds the plugin identity when registering an entry', () => {
+      service
+        .createBoundMethods(manifest.id, manifest)
+        .registerTaskContextMenuEntry(entry);
+
+      expect(taskContextMenuRegistry.register).toHaveBeenCalledOnceWith(
+        manifest.id,
+        entry,
+      );
+    });
+
+    it('removes task context menu entries during central plugin cleanup', () => {
+      service.unregisterPluginHooks(manifest.id);
+
+      expect(taskContextMenuRegistry.unregisterPlugin).toHaveBeenCalledOnceWith(
+        manifest.id,
+      );
+    });
+  });
+
   describe('reInitData', () => {
     it('should delegate to DataInitService.reInit', async () => {
       await service.reInitData();
@@ -540,6 +582,58 @@ describe('PluginBridgeService - iframe task selection methods', () => {
 
     await expectAsync(bound.getFocusedTask()).toBeResolvedTo(null);
     expect(taskService.getByIdOnce$).not.toHaveBeenCalled();
+  });
+});
+
+// #9946: deleteTask is the one live entry point that can hand an unknown id to
+// TaskService.remove(). The selector used to answer with a truthy id-less stub,
+// so this guard did nothing and the delete wiped every top-level task.
+describe('PluginBridgeService - deleteTask() with an unknown id', () => {
+  let service: PluginBridgeService;
+  let taskService: jasmine.SpyObj<TaskService>;
+  let store: MockStore;
+
+  beforeEach(() => {
+    taskService = jasmine.createSpyObj<TaskService>('TaskService', ['remove'], {
+      allTasks$: of([]),
+      selectedTask$: of(null),
+    });
+
+    TestBed.configureTestingModule({
+      providers: [
+        PluginBridgeService,
+        provideMockStore(),
+        { provide: SnackService, useValue: {} },
+        { provide: NotifyService, useValue: {} },
+        { provide: MatDialog, useValue: {} },
+        { provide: PluginHooksService, useValue: {} },
+        { provide: TaskService, useValue: taskService },
+        { provide: WorkContextService, useValue: { activeWorkContext$: of(null) } },
+        { provide: ProjectService, useValue: {} },
+        { provide: TagService, useValue: {} },
+        { provide: PluginUserPersistenceService, useValue: {} },
+        { provide: PluginConfigService, useValue: {} },
+        { provide: TaskArchiveService, useValue: {} },
+        { provide: Router, useValue: {} },
+        { provide: TranslateService, useValue: { instant: () => 'Task not found' } },
+        { provide: SyncWrapperService, useValue: {} },
+        { provide: GlobalThemeService, useValue: {} },
+        { provide: PluginIssueProviderRegistryService, useValue: {} },
+        { provide: IssueSyncAdapterRegistryService, useValue: {} },
+        { provide: PluginHttpService, useValue: {} },
+        { provide: DataInitService, useValue: {} },
+      ],
+    });
+
+    service = TestBed.inject(PluginBridgeService);
+    store = TestBed.inject(MockStore);
+  });
+
+  it('throws and removes nothing', async () => {
+    store.overrideSelector(selectTaskByIdWithSubTaskData, undefined);
+
+    await expectAsync(service.deleteTask('NO_SUCH_TASK')).toBeRejected();
+    expect(taskService.remove).not.toHaveBeenCalled();
   });
 });
 

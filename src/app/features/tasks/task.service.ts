@@ -991,6 +991,7 @@ export class TaskService {
       } else {
         // when on a tag such as today, we simply remove the tag instead of attempting to move to archive
         const tagToRemove = this._workContextService.activeWorkContextId;
+        // eslint-disable-next-line local-rules/no-user-content-in-logs -- grandfathered log baseline (2026-09), not yet triaged
         TaskLog.log('[TaskService] Removing tag from subtasks:', tagToRemove);
         subTasks.forEach((st) => {
           this.updateTags(
@@ -1196,7 +1197,8 @@ export class TaskService {
     return this._store.pipe(select(selectTasksByIdFactory(ids)));
   }
 
-  getByIdWithSubTaskData$(id: string): Observable<TaskWithSubTasks> {
+  /** Emits `undefined` for an unknown id — always check before use (#9946). */
+  getByIdWithSubTaskData$(id: string): Observable<TaskWithSubTasks | undefined> {
     return this._store.pipe(select(selectTaskByIdWithSubTaskData, { id }), take(1));
   }
 

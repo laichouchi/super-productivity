@@ -82,6 +82,13 @@ export const SUPER_SYNC_ERROR_CODES = {
   // flagged encrypted or lacks the ciphertext transport shape.
   E2EE_REQUIRED: 'E2EE_REQUIRED',
 
+  // Minimum app version (whole request, any non-2xx status). Not sent by any
+  // server yet: clients learn it first so a future floor can show them a
+  // calm "update the app" notice instead of a raw HTTP error. Clients must
+  // keep every pending op pending and never treat it as an auth failure.
+  // See docs/sync-and-op-log/client-version-floor.md.
+  CLIENT_UPDATE_REQUIRED: 'CLIENT_UPDATE_REQUIRED',
+
   // Server errors (500)
   INTERNAL_ERROR: 'INTERNAL_ERROR',
 } as const;
@@ -165,6 +172,14 @@ export const SuperSyncDownloadOpsQuerySchema = z.object({
   sinceSeq: z.coerce.number().int().min(0),
   limit: z.coerce.number().int().min(1).max(1000).optional(),
   excludeClient: SuperSyncClientIdSchema.optional(),
+  /**
+   * Bare semver of the calling app (`18.22.0`), recorded per device for the
+   * server's checkpoint gate (#9962). A query parameter rather than a header
+   * so browser clients need no new CORS allowance from older servers, which
+   * strip it as an unknown key. Loosely typed on purpose: the server drops a
+   * malformed value instead of failing the download.
+   */
+  appVersion: z.string().optional(),
 });
 
 export const SuperSyncUploadSnapshotRequestSchema = z
